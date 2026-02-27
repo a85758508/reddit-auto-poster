@@ -23,6 +23,12 @@ import os
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# Reddit 垃圾过滤触发词（参考 PHY041）
+SPAM_TRIGGER_WORDS = [
+    "free", "discount", "promo", "hack", "scrape", "bot",
+    "automate", "growth hack", "viral", "monetize",
+]
+
 
 def run_applescript(script):
     """执行 AppleScript 并返回结果"""
@@ -152,8 +158,14 @@ def submit_post(subreddit, title, body, modhash):
             # 检查是否有错误
             errors = data.get("json", {}).get("errors", [])
             if errors:
+                # 检查是否是 CAPTCHA 错误
+                is_captcha = any("CAPTCHA" in str(e).upper() for e in errors)
                 error_msg = "; ".join([str(e) for e in errors])
-                return {"success": False, "url": "", "post_id": "", "error": error_msg}
+                return {
+                    "success": False, "url": "", "post_id": "",
+                    "error": error_msg,
+                    "captcha_required": is_captcha,
+                }
 
             # 提取帖子 URL
             post_data = data.get("json", {}).get("data", {})
@@ -169,6 +181,135 @@ def submit_post(subreddit, title, body, modhash):
         return {"success": False, "url": "", "post_id": "", "error": title_result[4:]}
 
     return {"success": False, "url": "", "post_id": "", "error": f"未知响应: {title_result[:100]}"}
+
+
+def open_submit_page(subreddit, title, body, flair_text=None):
+    """CAPTCHA fallback: 用 old.reddit.com 打开发帖页面，JS 自动填入标题、正文和 flair"""
+    sub_name = subreddit.lstrip("r/").strip()
+    url = f"https://old.reddit.com/r/{sub_name}/submit?selftext=true"
+
+    # 打开发帖页面
+    script = (
+        f'tell application "Google Chrome"\n'
+        f'  activate\n'
+        f'  tell first window\n'
+        f'    make new tab with properties {{URL:"{url}"}}\n'
+        f'  end tell\n'
+        f'end tell'
+    )
+    run_applescript(script)
+    time.sleep(5)
+
+    # 用 JS 自动填入标题和正文
+    safe_title = title.replace("\\", "\\\\").replace('"', '\\"').replace("'", "\\'").replace("\n", " ")
+    safe_body = body.replace("\\", "\\\\").replace('"', '\\"').replace("'", "\\'").replace("\n", "\\n")
+
+    fill_js = (
+        f'var t=document.querySelector("textarea[name=title]")||document.querySelector("input[name=title]");'
+        f'var b=document.querySelector("textarea[name=text]");'
+        f'if(t)t.value="{safe_title}";'
+        f'if(b)b.value="{safe_body}";'
+    )
+
+    # 如果需要 flair，尝试自动选择
+    if flair_text:
+        fill_js += (
+            f'var flairBtn=document.querySelector(".flairselector-button,.linkflair-btn,[data-event-action=flair]");'
+            f'if(flairBtn)flairBtn.click();'
+        )
+
+    fill_js += f'document.title="FILLED:"+(t?"T":"")+(b?"B":"");'
+
+    execute_js(fill_js)
+    time.sleep(1)
+
+    result = read_title()
+    if result and "T" in result and "B" in result:
+        print(f"  ✅ 标题和正文已自动填入")
+        if flair_text:
+            print(f"  ℹ️  请手动选择 Flair: {flair_text}")
+    else:
+        print(f"  ⚠️  自动填入可能不完整: {result}")
+
+    return url
+
+
+def get_flair_id(subreddit, flair_text):
+    """通过 API 获取 flair template ID（参考 PHY041 方案）"""
+    sub_name = subreddit.lstrip("r/").strip()
+
+    js = (
+        '(async()=>{'
+        'try{'
+        f'let resp=await fetch("/r/{sub_name}/api/link_flair_v2",{{credentials:"include"}});'
+        'let flairs=await resp.json();'
+        'document.title="FLAIRS:"+JSON.stringify(flairs.map(f=>({id:f.id,text:f.text})));'
+        '}catch(e){'
+        'document.title="ERR:"+e.message;'
+        '}'
+        '})()'
+    )
+
+    execute_js(js)
+    time.sleep(3)
+
+    title = read_title()
+    if title and title.startswith("FLAIRS:"):
+        try:
+            flairs = json.loads(title[7:])
+            # 模糊匹配 flair 文本
+            flair_lower = flair_text.lower().strip()
+            for f in flairs:
+                if f.get("text", "").lower().strip() == flair_lower:
+                    return f["id"]
+            # 部分匹配
+            for f in flairs:
+                if flair_lower in f.get("text", "").lower():
+                    return f["id"]
+        except (json.JSONDecodeError, KeyError):
+            pass
+    return None
+
+
+def apply_flair(post_id, subreddit, flair_text, modhash):
+    """发帖后通过 /api/selectflair 设置 flair（参考 PHY041 方案）"""
+    flair_id = get_flair_id(subreddit, flair_text)
+    if not flair_id:
+        print(f"  ⚠️  未找到匹配的 Flair: {flair_text}")
+        return False
+
+    sub_name = subreddit.lstrip("r/").strip()
+    js = (
+        '(async()=>{'
+        'try{'
+        'let body=new URLSearchParams({'
+        f'link:"t3_{post_id}",'
+        f'flair_template_id:"{flair_id}",'
+        f'uh:"{modhash}"'
+        '});'
+        f'let resp=await fetch("/r/{sub_name}/api/selectflair",{{'
+        'method:"POST",'
+        'credentials:"include",'
+        'headers:{"Content-Type":"application/x-www-form-urlencoded"},'
+        'body:body.toString()'
+        '});'
+        'let result=await resp.json();'
+        'document.title="FLAIR_SET:"+JSON.stringify(result);'
+        '}catch(e){'
+        'document.title="ERR:"+e.message;'
+        '}'
+        '})()'
+    )
+
+    execute_js(js)
+    time.sleep(3)
+
+    title = read_title()
+    if title and title.startswith("FLAIR_SET:"):
+        print(f"  ✅ Flair 已设置: {flair_text}")
+        return True
+    print(f"  ⚠️  Flair 设置可能失败: {title}")
+    return False
 
 
 def verify_post(post_url, wait_seconds=60):
@@ -189,7 +330,7 @@ def verify_post(post_url, wait_seconds=60):
         return True  # API 调用失败，假设未删除
 
 
-def post_to_reddit(subreddit, title, body, dry_run=False, verify=True):
+def post_to_reddit(subreddit, title, body, dry_run=False, verify=True, flair_text=None):
     """
     完整发帖流程
 
@@ -199,6 +340,7 @@ def post_to_reddit(subreddit, title, body, dry_run=False, verify=True):
         body: 帖子正文
         dry_run: 仅模拟，不实际发帖
         verify: 发帖后是否验证
+        flair_text: 如需 flair，传入 flair 文本
 
     Returns:
         dict: {"success": bool, "url": str, "post_id": str, "error": str, "verified": bool}
@@ -243,12 +385,23 @@ def post_to_reddit(subreddit, title, body, dry_run=False, verify=True):
     result = submit_post(sub_name, title, body, modhash)
 
     if not result["success"]:
+        if result.get("captcha_required"):
+            print(f"  ⚠️  需要 CAPTCHA 验证，正在打开浏览器发帖页面...")
+            open_submit_page(sub_name, title, body, flair_text=flair_text)
+            print(f"  📋 已在 Chrome 中打开 r/{sub_name} 发帖页面（标题和内容已预填）")
+            print(f"  👉 请手动完成验证码并点击发布")
+            return {**result, "verified": False, "captcha_fallback": True}
         print(f"  ❌ 发帖失败: {result['error']}")
         return {**result, "verified": False}
 
     print(f"  ✅ 发帖成功: {result['url']}")
 
-    # Step 5: 验证
+    # Step 5: 发帖成功后设置 Flair（参考 PHY041 方案：flair 在帖子创建后单独设置）
+    if flair_text and result.get("post_id"):
+        print(f"  🏷️  正在设置 Flair: {flair_text}")
+        apply_flair(result["post_id"], sub_name, flair_text, modhash)
+
+    # Step 6: 验证
     verified = True
     if verify and result["url"]:
         verified = verify_post(result["url"], wait_seconds=60)

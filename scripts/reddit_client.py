@@ -108,6 +108,54 @@ def fetch_subreddit_posts(subreddit_name: str, sort: str = "hot", limit: int = 1
     return posts
 
 
+def fetch_subreddit_rules(subreddit_name: str) -> dict:
+    """获取 subreddit 的发帖规则和要求"""
+    name = subreddit_name.lstrip("r/").strip()
+    result = {"rules": [], "requirements": {}, "flair_required": False, "flair_options": []}
+
+    # 获取社区规则
+    try:
+        data = _get(f"https://www.reddit.com/r/{name}/about/rules.json")
+        for rule in data.get("rules", []):
+            result["rules"].append({
+                "name": rule.get("short_name", ""),
+                "description": rule.get("description", "")[:300],
+                "violation_reason": rule.get("violation_reason", ""),
+            })
+    except Exception:
+        pass
+
+    # 获取发帖要求
+    try:
+        data = _get(f"https://www.reddit.com/api/v1/{name}/post_requirements")
+        result["requirements"] = {
+            "title_min_length": data.get("title_text_min_length", 0),
+            "title_max_length": data.get("title_text_max_length", 300),
+            "body_min_length": data.get("body_text_min_length", 0),
+            "body_max_length": data.get("body_text_max_length", 0),
+            "body_required_strings": data.get("body_required_strings", []),
+            "title_required_strings": data.get("title_required_strings", []),
+            "body_restriction_policy": data.get("body_restriction_policy", ""),
+            "is_flair_required": data.get("is_flair_required", False),
+        }
+        result["flair_required"] = data.get("is_flair_required", False)
+    except Exception:
+        pass
+
+    # 获取可用 flair
+    try:
+        data = _get(f"https://www.reddit.com/r/{name}/api/link_flair_v2.json")
+        if isinstance(data, list):
+            result["flair_options"] = [
+                {"id": f.get("id", ""), "text": f.get("text", "")}
+                for f in data[:20]
+            ]
+    except Exception:
+        pass
+
+    return result
+
+
 # backward compatibility alias
 fetch_post_metrics_public = fetch_post_metrics
 

@@ -22,6 +22,12 @@ BANNED_PHRASES = [
 
 BAD_TITLE_STARTS = ["i built", "i made", "check out", "launching", "excited"]
 
+# Reddit 垃圾过滤触发词（参考 PHY041）
+SPAM_TRIGGER_WORDS = [
+    "free", "discount", "promo code", "hack", "scrape", "bot",
+    "automate posting", "growth hack", "viral trick", "monetize fast",
+]
+
 
 def load_json(path, default=None):
     full = os.path.join(BASE_DIR, path) if not os.path.isabs(path) else path
@@ -101,7 +107,17 @@ def get_recent_titles(log, days=14):
     return titles[-20:]  # 最多 20 个
 
 
-def build_prompt(config, profile, angle, log, examples):
+def fetch_rules(subreddit):
+    """获取 subreddit 发帖规则"""
+    try:
+        sys.path.insert(0, os.path.dirname(__file__))
+        from reddit_client import fetch_subreddit_rules
+        return fetch_subreddit_rules(subreddit)
+    except Exception:
+        return {"rules": [], "requirements": {}, "flair_required": False, "flair_options": []}
+
+
+def build_prompt(config, profile, angle, log, examples, rules=None):
     """构建生成 prompt"""
     angle_names = {"A": "Story/Journey", "B": "Feedback Request", "C": "Value/Insight"}
     angle_name = angle_names.get(angle, "Story/Journey")
@@ -143,11 +159,43 @@ STRICT RULES:
 3. Title: 60-100 characters ideal
 4. BANNED phrases (NEVER use): {', '.join(BANNED_PHRASES)}
 5. REQUIRED patterns: contractions (I'm, it's), hedging ("I think", "might"), specific failures, approximate numbers ("~200 users", "about 3 months")
+5b. SPAM TRIGGER WORDS (avoid these — they trigger Reddit's spam filter): {', '.join(SPAM_TRIGGER_WORDS)}
 6. Body template: Hook (1-2 sentences) → Context (2-3 sentences) → Substance (story/insight/question) → Product mention (1 honest sentence) → CTA (one genuine question)
 7. Must NOT sound like marketing. Sound like a real person sharing on Reddit.
 8. Must disclose you built/work on the product.
 9. End with a genuine, specific question for the community.
 10. Use markdown formatting (bold, lists) sparingly and naturally."""
+
+    # 构建规则部分
+    rules_str = ""
+    if rules and rules.get("rules"):
+        rules_str = "\n\n⚠️ SUBREDDIT RULES (YOU MUST FOLLOW ALL OF THESE):\n"
+        for r in rules["rules"]:
+            rules_str += f'- **{r["name"]}**: {r["description"][:200]}\n'
+
+    requirements_str = ""
+    if rules and rules.get("requirements"):
+        reqs = rules["requirements"]
+        parts = []
+        if reqs.get("title_min_length"):
+            parts.append(f"Title minimum length: {reqs['title_min_length']} chars")
+        if reqs.get("body_min_length"):
+            parts.append(f"Body minimum length: {reqs['body_min_length']} chars")
+        if reqs.get("title_required_strings"):
+            parts.append(f"Title MUST contain one of: {reqs['title_required_strings']}")
+        if reqs.get("body_required_strings"):
+            parts.append(f"Body MUST contain one of: {reqs['body_required_strings']}")
+        if reqs.get("is_flair_required"):
+            parts.append("Flair is REQUIRED for this subreddit")
+        if parts:
+            requirements_str = "\n\n⚠️ POST REQUIREMENTS:\n" + "\n".join(f"- {p}" for p in parts)
+
+    flair_str = ""
+    if rules and rules.get("flair_required") and rules.get("flair_options"):
+        flair_str = "\n\nAVAILABLE FLAIRS (pick the most appropriate one):\n"
+        for f in rules["flair_options"][:10]:
+            flair_str += f'- {f["text"]} (id: {f["id"]})\n'
+        flair_str += "\nInclude your flair choice at the end: FLAIR: [flair text]"
 
     user_prompt = f"""Write a Reddit post for **{profile.get('subreddit', 'r/unknown')}** using **Angle {angle} ({angle_name})**.
 
@@ -158,11 +206,14 @@ Subreddit context:
 - Activity: {profile.get('activity', '?')}
 - Tone/rules: {profile.get('promo_rules', '?')}
 - Community notes: {profile.get('notes', '?')}
+{rules_str}{requirements_str}{flair_str}
 
 Recent post titles (AVOID similar topics — be fresh and different):
 {recent_str}
 
 {f"Reference examples of good posts:{examples_str}" if examples_str else ""}
+
+CRITICAL: Your post MUST comply with ALL subreddit rules above. If rules say no promotion, make the post genuinely valuable with only a brief, natural mention of the product. If rules require specific formats, follow them exactly.
 
 Output EXACTLY in this format:
 TITLE: [your title here]
@@ -182,6 +233,11 @@ def quality_check(title, body):
     for phrase in BANNED_PHRASES:
         if phrase in full_text:
             issues.append(f"包含禁用词: '{phrase}'")
+
+    # 检查 Reddit 垃圾过滤触发词
+    for word in SPAM_TRIGGER_WORDS:
+        if word in full_text:
+            issues.append(f"包含垃圾过滤触发词: '{word}'")
 
     # 检查标题开头
     for start in BAD_TITLE_STARTS:
@@ -253,8 +309,18 @@ def generate_post(subreddit_profile, config, log, angle, model=None, max_retries
     client = anthropic.Anthropic(api_key=api_key)
     model = model or "claude-sonnet-4-20250514"
 
+    # 获取 subreddit 规则
+    print(f"  📋 正在获取 {subreddit_profile.get('subreddit', '?')} 的发帖规则...")
+    rules = fetch_rules(subreddit_profile.get("subreddit", ""))
+    if rules.get("rules"):
+        print(f"  ✅ 获取到 {len(rules['rules'])} 条规则")
+        if rules.get("flair_required"):
+            print(f"  ⚠️  该 subreddit 要求 Flair")
+    else:
+        print(f"  ℹ️  未获取到特定规则")
+
     examples = load_example_drafts(limit=2)
-    system_prompt, user_prompt = build_prompt(config, subreddit_profile, angle, log, examples)
+    system_prompt, user_prompt = build_prompt(config, subreddit_profile, angle, log, examples, rules=rules)
 
     for attempt in range(max_retries + 1):
         extra_instructions = ""
@@ -279,6 +345,14 @@ def generate_post(subreddit_profile, config, log, angle, model=None, max_retries
 
         passed, issues = quality_check(title, body)
         if passed or attempt >= max_retries:
+            # 检查生成内容中是否包含 flair 选择
+            flair_choice = None
+            for line in body.split("\n"):
+                if line.strip().upper().startswith("FLAIR:"):
+                    flair_choice = line.strip()[6:].strip()
+                    body = body.replace(line, "").strip()
+                    break
+
             return {
                 "title": title,
                 "body": body,
@@ -287,6 +361,8 @@ def generate_post(subreddit_profile, config, log, angle, model=None, max_retries
                 "quality_passed": passed,
                 "quality_issues": issues if not passed else [],
                 "attempts": attempt + 1,
+                "flair": flair_choice,
+                "rules": rules,
             }
 
     return None

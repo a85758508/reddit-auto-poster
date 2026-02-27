@@ -272,12 +272,17 @@ def run_daily(dry_run=False, count=None, no_wait=False):
         save_draft(sub, angle, title, body)
 
         # Step 3: 发帖
+        flair_text = post_content.get("flair")
+        if flair_text:
+            print(f"  🏷️  Flair: {flair_text}")
+
         print("\n  🚀 正在发帖...")
         try:
             post_result = post_to_reddit(
                 sub, title, body,
                 dry_run=auto_config.get("dry_run", False),
-                verify=not auto_config.get("dry_run", False)
+                verify=not auto_config.get("dry_run", False),
+                flair_text=flair_text,
             )
         except Exception as e:
             print(f"  ❌ 发帖失败: {e}")
