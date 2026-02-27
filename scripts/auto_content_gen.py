@@ -191,11 +191,12 @@ STRICT RULES:
             requirements_str = "\n\n⚠️ POST REQUIREMENTS:\n" + "\n".join(f"- {p}" for p in parts)
 
     flair_str = ""
-    if rules and rules.get("flair_required") and rules.get("flair_options"):
-        flair_str = "\n\nAVAILABLE FLAIRS (pick the most appropriate one):\n"
+    if rules and rules.get("flair_options"):
+        required_note = " (REQUIRED)" if rules.get("flair_required") else " (recommended)"
+        flair_str = f"\n\nAVAILABLE FLAIRS{required_note} — you MUST pick the most appropriate one:\n"
         for f in rules["flair_options"][:10]:
             flair_str += f'- {f["text"]} (id: {f["id"]})\n'
-        flair_str += "\nInclude your flair choice at the end: FLAIR: [flair text]"
+        flair_str += "\nYou MUST include your flair choice as the LAST line of the body: FLAIR: [exact flair text]"
 
     user_prompt = f"""Write a Reddit post for **{profile.get('subreddit', 'r/unknown')}** using **Angle {angle} ({angle_name})**.
 
@@ -287,6 +288,64 @@ def parse_response(text):
     return title.strip(), body.strip()
 
 
+def select_best_flair(title, body, flair_options):
+    """根据帖子内容关键词自动匹配最佳 flair（AI 没选时的 fallback）"""
+    if not flair_options:
+        return None
+
+    text = (title + " " + body).lower()
+
+    # 关键词 → flair 映射（按优先级排序）
+    keyword_map = {
+        "feedback": ["feedback", "review", "critique", "roast"],
+        "question": ["question", "help", "how to", "can't figure", "stuck on", "advice"],
+        "discussion": ["discussion", "thoughts", "what do you think", "your take", "opinion"],
+        "story": ["story", "journey", "experience", "learned", "months ago"],
+        "showcase": ["showcase", "show", "demo", "launched", "built"],
+        "resource": ["resource", "guide", "tutorial", "tip"],
+        "promotion": ["promo", "launch", "announce"],
+        "project": ["project", "side project", "app", "tool", "platform"],
+        "insight": ["insight", "data", "found", "discovered", "research"],
+    }
+
+    # 对每个可用 flair 计算匹配分数
+    best_flair = None
+    best_score = 0
+
+    for flair in flair_options:
+        flair_text_lower = flair.get("text", "").lower()
+        score = 0
+
+        # 直接匹配 flair 名称
+        for key, keywords in keyword_map.items():
+            if key in flair_text_lower:
+                for kw in keywords:
+                    if kw in text:
+                        score += 2
+
+        # 模糊匹配
+        flair_words = flair_text_lower.split()
+        for word in flair_words:
+            if len(word) > 3 and word in text:
+                score += 1
+
+        if score > best_score:
+            best_score = score
+            best_flair = flair.get("text")
+
+    # 如果没有匹配到，选第一个通用类的 flair
+    if not best_flair:
+        generic_names = ["discussion", "general", "other", "misc", "question"]
+        for flair in flair_options:
+            if flair.get("text", "").lower() in generic_names:
+                return flair["text"]
+        # 最后 fallback：选第一个
+        if flair_options:
+            return flair_options[0]["text"]
+
+    return best_flair
+
+
 def generate_post(subreddit_profile, config, log, angle, model=None, max_retries=2):
     """
     生成一篇 Reddit 帖子
@@ -314,10 +373,12 @@ def generate_post(subreddit_profile, config, log, angle, model=None, max_retries
     rules = fetch_rules(subreddit_profile.get("subreddit", ""))
     if rules.get("rules"):
         print(f"  ✅ 获取到 {len(rules['rules'])} 条规则")
-        if rules.get("flair_required"):
-            print(f"  ⚠️  该 subreddit 要求 Flair")
     else:
         print(f"  ℹ️  未获取到特定规则")
+    if rules.get("flair_options"):
+        flair_names = [f["text"] for f in rules["flair_options"][:5]]
+        req_tag = "（必选）" if rules.get("flair_required") else "（可选）"
+        print(f"  🏷️  可用 Flair{req_tag}: {', '.join(flair_names)}{'...' if len(rules['flair_options']) > 5 else ''}")
 
     examples = load_example_drafts(limit=2)
     system_prompt, user_prompt = build_prompt(config, subreddit_profile, angle, log, examples, rules=rules)
@@ -353,6 +414,13 @@ def generate_post(subreddit_profile, config, log, angle, model=None, max_retries
                     body = body.replace(line, "").strip()
                     break
 
+            # Fallback: AI 没选 flair 但有可用选项时，用关键词匹配自动选
+            flair_options = rules.get("flair_options", []) if rules else []
+            if not flair_choice and flair_options:
+                flair_choice = select_best_flair(title, body, flair_options)
+                if flair_choice:
+                    print(f"  🏷️  自动匹配 Flair: {flair_choice}")
+
             return {
                 "title": title,
                 "body": body,
@@ -362,6 +430,7 @@ def generate_post(subreddit_profile, config, log, angle, model=None, max_retries
                 "quality_issues": issues if not passed else [],
                 "attempts": attempt + 1,
                 "flair": flair_choice,
+                "flair_options": flair_options,
                 "rules": rules,
             }
 

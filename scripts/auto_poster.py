@@ -209,43 +209,123 @@ def open_submit_page(subreddit, title, body, flair_text=None):
         f'var b=document.querySelector("textarea[name=text]");'
         f'if(t)t.value="{safe_title}";'
         f'if(b)b.value="{safe_body}";'
+        f'document.title="FILLED:"+(t?"T":"")+(b?"B":"");'
     )
-
-    # 如果需要 flair，尝试自动选择
-    if flair_text:
-        fill_js += (
-            f'var flairBtn=document.querySelector(".flairselector-button,.linkflair-btn,[data-event-action=flair]");'
-            f'if(flairBtn)flairBtn.click();'
-        )
-
-    fill_js += f'document.title="FILLED:"+(t?"T":"")+(b?"B":"");'
 
     execute_js(fill_js)
     time.sleep(1)
 
     result = read_title()
-    if result and "T" in result and "B" in result:
+    filled_ok = result and "T" in result and "B" in result
+    if filled_ok:
         print(f"  ✅ 标题和正文已自动填入")
-        if flair_text:
-            print(f"  ℹ️  请手动选择 Flair: {flair_text}")
     else:
         print(f"  ⚠️  自动填入可能不完整: {result}")
+
+    # 自动选择 Flair
+    if flair_text:
+        time.sleep(1)
+        flair_selected = _select_flair_on_page(flair_text)
+        if not flair_selected:
+            print(f"  ℹ️  请手动选择 Flair: {flair_text}")
 
     return url
 
 
-def get_flair_id(subreddit, flair_text):
-    """通过 API 获取 flair template ID（参考 PHY041 方案）"""
+def _select_flair_on_page(flair_text):
+    """在 old.reddit.com 提交页面自动选择 flair"""
+    safe_flair = flair_text.replace("\\", "\\\\").replace('"', '\\"').replace("'", "\\'")
+
+    # Step 1: 点击 flair 选择器按钮打开面板
+    open_js = (
+        'var btn=document.querySelector(".flairselector-button")'
+        '||document.querySelector("a.flairselector")'
+        '||document.querySelector("[data-event-action=flair]")'
+        '||document.querySelector(".linkflair-button")'
+        '||document.querySelector("button.flair-toggle");'
+        'if(btn){btn.click();document.title="FLAIR_OPENED:Y"}'
+        'else{document.title="FLAIR_OPENED:N"}'
+    )
+    execute_js(open_js)
+    time.sleep(2)
+
+    result = read_title()
+    if not result or "FLAIR_OPENED:Y" not in result:
+        # 可能没有 flair 选择器按钮，尝试直接查找 flair 面板
+        pass
+
+    # Step 2: 在打开的面板中找到匹配的 flair 并点击
+    select_js = (
+        f'var target="{safe_flair}".toLowerCase();'
+        'var found=false;'
+        # old.reddit.com flair 选项通常在 .flairselector .flairoptionpane 里
+        'var items=document.querySelectorAll(".flairselector .flairoptionpane li,'
+        '.flairselector .flairselection,'
+        '.flairoptionpane a.customizer,'
+        '.flairoptionpane .linkflair a,'
+        '.linkflair-widget li,'
+        '.flair-list li,'
+        '.flair-list-item");'
+        'for(var i=0;i<items.length;i++){'
+        'var txt=(items[i].textContent||items[i].innerText||"").trim().toLowerCase();'
+        'if(txt===target||txt.indexOf(target)>=0||target.indexOf(txt)>=0){'
+        'items[i].click();found=true;break;'
+        '}}'
+        # 也尝试 label/span 匹配
+        'if(!found){'
+        'var spans=document.querySelectorAll(".flairselector span.linkflairlabel,'
+        '.flairselector .linkflair span,'
+        '.flairselector .flairselection span");'
+        'for(var j=0;j<spans.length;j++){'
+        'var st=(spans[j].textContent||"").trim().toLowerCase();'
+        'if(st===target||st.indexOf(target)>=0||target.indexOf(st)>=0){'
+        'spans[j].closest("li,a,.flairselection")?.click();found=true;break;'
+        '}}}'
+        'document.title="FLAIR_SELECT:"+(found?"OK":"MISS");'
+    )
+    execute_js(select_js)
+    time.sleep(1)
+
+    result = read_title()
+    if result and "FLAIR_SELECT:OK" in result:
+        # Step 3: 点击保存按钮
+        save_js = (
+            'var saveBtn=document.querySelector(".flairselector .save,'
+            '.flairselector button[type=submit],'
+            '.flairselector input[type=submit],'
+            '.flairselector .flairsave");'
+            'if(saveBtn){saveBtn.click();document.title="FLAIR_SAVED:Y"}'
+            'else{document.title="FLAIR_SAVED:N"}'
+        )
+        execute_js(save_js)
+        time.sleep(1)
+
+        result = read_title()
+        if result and "FLAIR_SAVED:Y" in result:
+            print(f"  ✅ Flair 已自动选择: {flair_text}")
+            return True
+        else:
+            print(f"  ⚠️  Flair 已选中但保存可能失败")
+            return True  # 已选中，可能不需要保存
+    else:
+        print(f"  ⚠️  未在页面找到匹配的 Flair: {flair_text}")
+        return False
+
+
+def fetch_flairs_via_chrome(subreddit):
+    """通过 Chrome 已登录 session 获取 subreddit 的 flair 列表"""
     sub_name = subreddit.lstrip("r/").strip()
 
     js = (
         '(async()=>{'
         'try{'
-        f'let resp=await fetch("/r/{sub_name}/api/link_flair_v2",{{credentials:"include"}});'
+        f'let resp=await fetch("/r/{sub_name}/api/link_flair_v2.json",{{credentials:"include"}});'
+        'if(!resp.ok){document.title="FLAIRS:[]";return;}'
         'let flairs=await resp.json();'
+        'if(!Array.isArray(flairs)){document.title="FLAIRS:[]";return;}'
         'document.title="FLAIRS:"+JSON.stringify(flairs.map(f=>({id:f.id,text:f.text})));'
         '}catch(e){'
-        'document.title="ERR:"+e.message;'
+        'document.title="FLAIRS:[]";'
         '}'
         '})()'
     )
@@ -256,19 +336,101 @@ def get_flair_id(subreddit, flair_text):
     title = read_title()
     if title and title.startswith("FLAIRS:"):
         try:
-            flairs = json.loads(title[7:])
-            # 模糊匹配 flair 文本
-            flair_lower = flair_text.lower().strip()
-            for f in flairs:
-                if f.get("text", "").lower().strip() == flair_lower:
-                    return f["id"]
-            # 部分匹配
-            for f in flairs:
-                if flair_lower in f.get("text", "").lower():
-                    return f["id"]
+            return json.loads(title[7:])
         except (json.JSONDecodeError, KeyError):
             pass
+    return []
+
+
+def get_flair_id(subreddit, flair_text):
+    """通过 Chrome session 获取 flair template ID，支持模糊匹配"""
+    flairs = fetch_flairs_via_chrome(subreddit)
+    if not flairs:
+        return None
+
+    flair_lower = flair_text.lower().strip()
+    # 精确匹配
+    for f in flairs:
+        if f.get("text", "").lower().strip() == flair_lower:
+            return f["id"]
+    # 部分匹配
+    for f in flairs:
+        if flair_lower in f.get("text", "").lower() or f.get("text", "").lower() in flair_lower:
+            return f["id"]
     return None
+
+
+def auto_select_flair(subreddit, title, body):
+    """自动根据帖子内容选择最佳 flair（通过 Chrome 获取可用 flair 后用关键词匹配）"""
+    flairs = fetch_flairs_via_chrome(subreddit)
+    if not flairs:
+        return None, []
+
+    text = (title + " " + body).lower()
+
+    # 关键词 → flair 类型映射
+    keyword_map = {
+        "feedback": ["feedback", "review", "critique", "roast"],
+        "question": ["question", "advice", "how do i", "how can i", "how should i"],
+        "how do": ["how do i", "how can i", "how should", "stuck", "can't figure", "help me"],
+        "help": ["help", "stuck", "can't figure", "need advice", "how do i"],
+        "discussion": ["discussion", "thoughts", "what do you think", "your take", "opinion", "have you"],
+        "story": ["story", "journey", "experience", "learned", "months ago", "lost", "failed", "after"],
+        "success": ["success", "achieved", "milestone", "growth", "revenue", "users", "launched"],
+        "showcase": ["showcase", "show", "demo", "launched", "built", "made"],
+        "resource": ["resource", "guide", "tutorial", "tip", "best practice"],
+        "best practice": ["best practice", "tips", "advice", "strategy", "approach"],
+        "promotion": ["promo", "launch", "announce", "introducing"],
+        "project": ["project", "side project", "app", "tool", "platform"],
+        "insight": ["insight", "data", "found", "discovered", "research", "tracking"],
+        "growth": ["growth", "scale", "expand", "revenue", "marketing", "retention"],
+        "tiktok": ["tiktok", "short-form", "short form", "reels", "shorts"],
+        "youtube": ["youtube", "video", "channel", "subscriber"],
+        "content": ["content", "creator", "creating", "posting"],
+    }
+
+    best_flair = None
+    best_score = 0
+
+    for flair in flairs:
+        flair_text_lower = flair.get("text", "").lower().strip()
+        score = 0
+
+        # 精确 flair 名称匹配关键词类别
+        for category, keywords in keyword_map.items():
+            if category in flair_text_lower or flair_text_lower in category:
+                for kw in keywords:
+                    if kw in text:
+                        score += 3
+
+        # flair 名称中的词出现在帖子内容中
+        for word in flair_text_lower.replace("&amp;", "&").split():
+            if len(word) > 2 and word in text:
+                score += 1
+
+        # 帖子标题中的词出现在 flair 名称中
+        title_lower = title.lower()
+        for word in flair_text_lower.split():
+            if len(word) > 2 and word in title_lower:
+                score += 2
+
+        if score > best_score:
+            best_score = score
+            best_flair = flair
+
+    # 没匹配到时选通用类 flair
+    if not best_flair:
+        generic = ["discussion", "general", "other", "misc", "question"]
+        for flair in flairs:
+            if flair.get("text", "").lower() in generic:
+                best_flair = flair
+                break
+        if not best_flair and flairs:
+            best_flair = flairs[0]
+
+    if best_flair:
+        return best_flair.get("text"), flairs
+    return None, flairs
 
 
 def apply_flair(post_id, subreddit, flair_text, modhash):
@@ -380,7 +542,19 @@ def post_to_reddit(subreddit, title, body, dry_run=False, verify=True, flair_tex
         return {"success": False, "url": "", "post_id": "", "error": "无法获取 modhash（可能未登录 Reddit）", "verified": False}
     print("  ✅ 认证成功")
 
-    # Step 4: 提交帖子
+    # Step 4: 获取 flair（如果没有预选，自动根据内容选择）
+    if not flair_text:
+        print("  🏷️  正在获取可用 Flair...")
+        auto_flair, available_flairs = auto_select_flair(sub_name, title, body)
+        if auto_flair:
+            flair_text = auto_flair
+            print(f"  ✅ 自动选择 Flair: {flair_text}")
+        elif available_flairs:
+            print(f"  ℹ️  有 {len(available_flairs)} 个可用 Flair 但未匹配到合适的")
+        else:
+            print(f"  ℹ️  该 subreddit 无需 Flair")
+
+    # Step 5: 提交帖子
     print(f"  正在发帖到 r/{sub_name}...")
     result = submit_post(sub_name, title, body, modhash)
 
@@ -396,12 +570,12 @@ def post_to_reddit(subreddit, title, body, dry_run=False, verify=True, flair_tex
 
     print(f"  ✅ 发帖成功: {result['url']}")
 
-    # Step 5: 发帖成功后设置 Flair（参考 PHY041 方案：flair 在帖子创建后单独设置）
+    # Step 6: 发帖成功后设置 Flair（参考 PHY041 方案：flair 在帖子创建后单独设置）
     if flair_text and result.get("post_id"):
         print(f"  🏷️  正在设置 Flair: {flair_text}")
         apply_flair(result["post_id"], sub_name, flair_text, modhash)
 
-    # Step 6: 验证
+    # Step 7: 验证
     verified = True
     if verify and result["url"]:
         verified = verify_post(result["url"], wait_seconds=60)
