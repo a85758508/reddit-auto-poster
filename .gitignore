@@ -1,0 +1,24 @@
+# 凭证文件（绝对不能提交）
+memory/.reddit_credentials
+memory/.anthropic_key
+
+# 自动化运行日志
+memory/automation/
+memory/automation-config.json
+
+# 草稿和个人数据（可选择是否提交）
+memory/drafts/
+memory/posted-log.json
+memory/subreddit-profiles.json
+memory/performance/
+memory/config.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
