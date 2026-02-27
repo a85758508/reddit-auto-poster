@@ -236,13 +236,11 @@ def _select_flair_on_page(flair_text):
     """在 old.reddit.com 提交页面自动选择 flair"""
     safe_flair = flair_text.replace("\\", "\\\\").replace('"', '\\"').replace("'", "\\'")
 
-    # Step 1: 点击 flair 选择器按钮打开面板
+    # Step 1: 点击 "select" 按钮打开 flair 面板
     open_js = (
-        'var btn=document.querySelector(".flairselector-button")'
-        '||document.querySelector("a.flairselector")'
-        '||document.querySelector("[data-event-action=flair]")'
-        '||document.querySelector(".linkflair-button")'
-        '||document.querySelector("button.flair-toggle");'
+        'var btn=document.querySelector("button.flairselect-btn")'
+        '||document.querySelector(".flairselector-button")'
+        '||document.querySelector("a.flairselectbtn");'
         'if(btn){btn.click();document.title="FLAIR_OPENED:Y"}'
         'else{document.title="FLAIR_OPENED:N"}'
     )
@@ -251,35 +249,28 @@ def _select_flair_on_page(flair_text):
 
     result = read_title()
     if not result or "FLAIR_OPENED:Y" not in result:
-        # 可能没有 flair 选择器按钮，尝试直接查找 flair 面板
-        pass
+        print(f"  ⚠️  未找到 Flair 选择按钮")
+        return False
 
-    # Step 2: 在打开的面板中找到匹配的 flair 并点击
+    # Step 2: 在面板中找到匹配的 flair li 并点击
+    # old.reddit.com DOM: ul > li.flairsample-left > div.linkflair > span.linkflairlabel
     select_js = (
-        f'var target="{safe_flair}".toLowerCase();'
+        f'var target="{safe_flair}".toLowerCase().trim();'
         'var found=false;'
-        # old.reddit.com flair 选项通常在 .flairselector .flairoptionpane 里
-        'var items=document.querySelectorAll(".flairselector .flairoptionpane li,'
-        '.flairselector .flairselection,'
-        '.flairoptionpane a.customizer,'
-        '.flairoptionpane .linkflair a,'
-        '.linkflair-widget li,'
-        '.flair-list li,'
-        '.flair-list-item");'
+        'var items=document.querySelectorAll(".flairoptionpane li");'
         'for(var i=0;i<items.length;i++){'
-        'var txt=(items[i].textContent||items[i].innerText||"").trim().toLowerCase();'
-        'if(txt===target||txt.indexOf(target)>=0||target.indexOf(txt)>=0){'
+        'var label=items[i].querySelector("span.linkflairlabel,.linkflair span");'
+        'var txt=label?(label.textContent||"").trim().toLowerCase():(items[i].textContent||"").trim().toLowerCase();'
+        'if(txt===target){'
         'items[i].click();found=true;break;'
         '}}'
-        # 也尝试 label/span 匹配
+        # 没精确匹配时尝试部分匹配
         'if(!found){'
-        'var spans=document.querySelectorAll(".flairselector span.linkflairlabel,'
-        '.flairselector .linkflair span,'
-        '.flairselector .flairselection span");'
-        'for(var j=0;j<spans.length;j++){'
-        'var st=(spans[j].textContent||"").trim().toLowerCase();'
-        'if(st===target||st.indexOf(target)>=0||target.indexOf(st)>=0){'
-        'spans[j].closest("li,a,.flairselection")?.click();found=true;break;'
+        'for(var i=0;i<items.length;i++){'
+        'var label=items[i].querySelector("span.linkflairlabel,.linkflair span");'
+        'var txt=label?(label.textContent||"").trim().toLowerCase():(items[i].textContent||"").trim().toLowerCase();'
+        'if(txt.indexOf(target)>=0||target.indexOf(txt)>=0){'
+        'items[i].click();found=true;break;'
         '}}}'
         'document.title="FLAIR_SELECT:"+(found?"OK":"MISS");'
     )
@@ -288,12 +279,12 @@ def _select_flair_on_page(flair_text):
 
     result = read_title()
     if result and "FLAIR_SELECT:OK" in result:
-        # Step 3: 点击保存按钮
+        # Step 3: 点击 save 按钮确认选择
         save_js = (
-            'var saveBtn=document.querySelector(".flairselector .save,'
-            '.flairselector button[type=submit],'
-            '.flairselector input[type=submit],'
-            '.flairselector .flairsave");'
+            'var saveBtn=document.querySelector(".flairselector .save")'
+            '||document.querySelector(".flairselector button.save")'
+            '||document.querySelector("#newlink-flair-dropdown .save")'
+            '||document.querySelector(".flairoptionpane ~ .savebutton button");'
             'if(saveBtn){saveBtn.click();document.title="FLAIR_SAVED:Y"}'
             'else{document.title="FLAIR_SAVED:N"}'
         )
@@ -305,8 +296,9 @@ def _select_flair_on_page(flair_text):
             print(f"  ✅ Flair 已自动选择: {flair_text}")
             return True
         else:
-            print(f"  ⚠️  Flair 已选中但保存可能失败")
-            return True  # 已选中，可能不需要保存
+            # 选中了但可能没有 save 按钮（某些 subreddit 点击即确认）
+            print(f"  ✅ Flair 已选中: {flair_text}")
+            return True
     else:
         print(f"  ⚠️  未在页面找到匹配的 Flair: {flair_text}")
         return False
@@ -387,13 +379,28 @@ def auto_select_flair(subreddit, title, body):
         "tiktok": ["tiktok", "short-form", "short form", "reels", "shorts"],
         "youtube": ["youtube", "video", "channel", "subscriber"],
         "content": ["content", "creator", "creating", "posting"],
+        "career": ["career", "job", "earn", "income", "salary", "monetiz", "money", "brand"],
+        "finance": ["financial", "earn", "income", "money", "invest", "retirement"],
+        "aging": ["aging", "older", "age", "40+", "35+", "midlife"],
+        "tech": ["tech", "software", "platform", "app", "algorithm", "digital"],
+        "pop culture": ["pop culture", "media", "social media", "platform", "trend"],
+        "article": ["article", "report", "study", "research", "data", "tracking"],
+        "nostalgia": ["nostalgia", "remember", "back in", "used to", "growing up"],
     }
+
+    # 危险/陷阱/不适合的 flair 关键词（永远不选这些）
+    banned_flairs = ["honeytrap", "ban me", "forbidden", "bot ", "obituary", "ai content", "i will not"]
 
     best_flair = None
     best_score = 0
 
     for flair in flairs:
         flair_text_lower = flair.get("text", "").lower().strip()
+
+        # 跳过陷阱 flair
+        if any(b in flair_text_lower for b in banned_flairs):
+            continue
+
         score = 0
 
         # 精确 flair 名称匹配关键词类别
@@ -403,15 +410,16 @@ def auto_select_flair(subreddit, title, body):
                     if kw in text:
                         score += 3
 
-        # flair 名称中的词出现在帖子内容中
+        # flair 名称中的词出现在帖子内容中（至少3个字符，排除过于泛化的词）
+        generic_words = {"the", "and", "for", "not", "but", "content", "post", "new"}
         for word in flair_text_lower.replace("&amp;", "&").split():
-            if len(word) > 2 and word in text:
+            if len(word) > 3 and word not in generic_words and word in text:
                 score += 1
 
         # 帖子标题中的词出现在 flair 名称中
         title_lower = title.lower()
         for word in flair_text_lower.split():
-            if len(word) > 2 and word in title_lower:
+            if len(word) > 3 and word not in generic_words and word in title_lower:
                 score += 2
 
         if score > best_score:
